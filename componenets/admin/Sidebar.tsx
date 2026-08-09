@@ -54,17 +54,17 @@ const navItems = [
       </>
     ),
   },
-  {
-    label: 'Rental periods and late fees',
-    href: '/admin/rental-periods',
-    icon: (
-      <>
-        <circle cx="12" cy="13" r="8" />
-        <path d="M12 9v4l3 2" />
-        <path d="M9 2h6" />
-      </>
-    ),
-  },
+  // {
+  //   label: 'Rental periods and late fees',
+  //   href: '/admin/rental-periods',
+  //   icon: (
+  //     <>
+  //       <circle cx="12" cy="13" r="8" />
+  //       <path d="M12 9v4l3 2" />
+  //       <path d="M9 2h6" />
+  //     </>
+  //   ),
+  // },
   // {
   //   label: 'Org settings',
   //   href: '/admin/settings',

@@ -8,7 +8,7 @@ const INITIAL_PERIODS = [
     name: 'Hourly Rental',
     durationHours: 1,
     periodType: 'hourly',
-    lateFeeRate: '$5 / hour',
+    lateFeeRate: '₹5 / hour',
     gracePeriod: '15 mins',
   },
   {
@@ -16,7 +16,7 @@ const INITIAL_PERIODS = [
     name: 'Daily Rental',
     durationHours: 24,
     periodType: 'daily',
-    lateFeeRate: '$25 / day',
+    lateFeeRate: '₹25 / day',
     gracePeriod: '60 mins',
   },
   {
@@ -24,7 +24,7 @@ const INITIAL_PERIODS = [
     name: 'Weekly Rental',
     durationHours: 168,
     periodType: 'weekly',
-    lateFeeRate: '$100 / week',
+    lateFeeRate: '₹100 / week',
     gracePeriod: '120 mins',
   },
 ];
@@ -49,7 +49,7 @@ export default function RentalPeriodsPage() {
         name: newPeriod.name,
         durationHours: Number(newPeriod.durationHours),
         periodType: newPeriod.periodType,
-        lateFeeRate: `$${newPeriod.lateFeeRate} / ${newPeriod.periodType}`,
+        lateFeeRate: `₹${newPeriod.lateFeeRate} / ${newPeriod.periodType}`,
         gracePeriod: `${newPeriod.gracePeriodMinutes} mins`,
       },
     ]);
@@ -166,7 +166,7 @@ export default function RentalPeriodsPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">Late Fee Penalty ($)</label>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Late Fee Penalty (₹)</label>
                   <input
                     type="number"
                     required

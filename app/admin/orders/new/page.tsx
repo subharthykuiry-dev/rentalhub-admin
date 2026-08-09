@@ -163,7 +163,7 @@ export default function CreateOrderPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-semibold text-slate-600 mb-1">
-                Rental Charge ($)
+                Rental Charge (₹)
               </label>
               <input
                 type="number"
@@ -175,7 +175,7 @@ export default function CreateOrderPage() {
 
             <div>
               <label className="block text-xs font-semibold text-slate-600 mb-1">
-                Security Deposit Held ($)
+                Security Deposit Held (₹)
               </label>
               <input
                 type="number"
@@ -188,7 +188,7 @@ export default function CreateOrderPage() {
 
           <div className="bg-slate-50 p-4 rounded-lg border border-slate-200 flex items-center justify-between text-slate-800 font-bold text-base mt-2">
             <span>Total Collected In-Store:</span>
-            <span className="text-xl text-blue-600">${handleCalculateTotal()}</span>
+            <span className="text-xl text-blue-600">₹{handleCalculateTotal()}</span>
           </div>
         </div>
 

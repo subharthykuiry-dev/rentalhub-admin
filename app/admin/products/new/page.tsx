@@ -492,7 +492,7 @@ export default function NewProductPage() {
                 }
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
               >
-                <option value="fixed">Fixed Amount ($)</option>
+                <option value="fixed">Fixed Amount (₹)</option>
                 <option value="percentage">Percentage of Rental (%)</option>
               </select>
             </div>

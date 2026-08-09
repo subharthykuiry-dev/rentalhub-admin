@@ -384,7 +384,7 @@ export default function AdminDashboardPage() {
                       <div className="text-slate-400 text-[11px]">{p.storeLocation?.city}</div>
                     </td>
                     <td className="px-5 py-3 font-semibold text-emerald-600">
-                      {p.deposit?.type === 'percentage' ? `${p.deposit?.value}% rent` : `$${p.deposit?.value} fixed`}
+                      {p.deposit?.type === 'percentage' ? `${p.deposit?.value}% rent` : `₹${p.deposit?.value} fixed`}
                     </td>
                     <td className="px-5 py-3 font-medium">
                       <span className="text-blue-600">{p.availableQuantity}</span>

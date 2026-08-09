@@ -349,7 +349,7 @@ export default function ProductsPage() {
                       <div className="bg-slate-900 text-white rounded-full px-3 py-1 text-[11px] font-bold shrink-0 shadow-sm">
                         {product.deposit?.type === 'percentage'
                           ? `${product.deposit?.value}% deposit`
-                          : `$${product.deposit?.value} deposit`}
+                          : `₹${product.deposit?.value} deposit`}
                       </div>
                     </div>
 
