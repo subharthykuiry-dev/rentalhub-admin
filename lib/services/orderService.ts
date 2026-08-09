@@ -18,6 +18,8 @@ import {
   createRentalCheckoutOrder,
   updateBookingLifecycle,
   markOverdueBookings,
+  holdBookingStock,
+  releaseBookingStock,
   serializeBookingDoc,
   serializeOrderDoc,
 } from '@/lib/rental-service';
@@ -289,6 +291,10 @@ export async function deleteOrder(orderId: string, adminEmail?: string) {
         ).values(),
       ];
 
+      // Deleting a booking removes its date reservation but would strand the
+      // units it holds in `availableStock`, so hand them back first.
+      await releaseBookingStock(bookingIds, session);
+
       const byBooking = bookingIds.length ? [{ booking: { $in: bookingIds } }] : [];
 
       const payments = await Payment.deleteMany({
@@ -370,6 +376,10 @@ export async function approveOrder(orderId: string, adminEmail?: string) {
       await booking.save();
     }
   }
+
+  // Approval commits the order to fulfilment, so its units leave the shelf now
+  // rather than at handover. No-op for lines already deducted at checkout.
+  await holdBookingStock(bookings.map((booking) => booking._id));
 
   return { ok: true as const, status: 200, data: { orderNumber: order.orderNumber } };
 }

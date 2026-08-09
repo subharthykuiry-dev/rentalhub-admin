@@ -21,6 +21,79 @@ const ACTIVE_BOOKING_STATUSES = [
 const RETURNABLE_STATUSES = ['active', 'overdue'] as const;
 const CANCELLABLE_STATUSES = ['draft', 'pending_payment', 'confirmed', 'ready_for_pickup', 'out_for_delivery'] as const;
 
+/**
+ * STOCK ACCOUNTING
+ *
+ * `product.availableStock` counts units that are free to rent out. A unit stops
+ * being free the moment its order is committed to fulfilment — COD/walk-in at
+ * creation, online at payment confirmation, admin-held orders at approval — and
+ * stays unavailable until the return is settled or the order is cancelled.
+ * Pickup is a physical handover, not a stock event.
+ *
+ * Both helpers key off `booking.stockDeducted` so they are safe to call more
+ * than once: a replayed gateway webhook cannot double-deduct, and a booking
+ * that went overdue without ever being picked up cannot inflate stock on
+ * return. Neither saves the booking — callers persist it alongside their own
+ * changes, inside the caller's transaction.
+ */
+async function deductProductStock(booking: IBooking, session?: mongoose.ClientSession | null) {
+  if (booking.stockDeducted) return;
+
+  const product = await Product.findById(booking.product).session(session ?? null);
+  if (!product) return;
+
+  product.availableStock = Math.max(0, (product.availableStock ?? product.totalStock ?? 0) - booking.quantity);
+  await product.save({ session: session ?? undefined });
+  booking.stockDeducted = true;
+}
+
+async function restoreProductStock(booking: IBooking, session?: mongoose.ClientSession | null) {
+  if (!booking.stockDeducted) return;
+
+  const product = await Product.findById(booking.product).session(session ?? null);
+  if (!product) return;
+
+  product.availableStock = Math.min(product.totalStock, (product.availableStock || 0) + booking.quantity);
+  await product.save({ session: session ?? undefined });
+  booking.stockDeducted = false;
+}
+
+/**
+ * Takes units off the shelf for bookings committed outside the checkout and
+ * payment flows — an admin approving a held order. Persists each booking, since
+ * the caller has no other reason to save it.
+ */
+export async function holdBookingStock(
+  bookingIds: mongoose.Types.ObjectId[] | string[],
+  session?: mongoose.ClientSession | null
+) {
+  if (!bookingIds.length) return;
+
+  const bookings = await Booking.find({ _id: { $in: bookingIds }, stockDeducted: false }).session(session ?? null);
+  for (const booking of bookings) {
+    await deductProductStock(booking, session);
+    await booking.save({ session: session ?? undefined });
+  }
+}
+
+/**
+ * Returns held units to the shelf for bookings that are about to disappear or
+ * be closed outside the normal lifecycle (order deletion, bulk cancellation).
+ * Persists each booking, since the caller has no other reason to save it.
+ */
+export async function releaseBookingStock(
+  bookingIds: mongoose.Types.ObjectId[] | string[],
+  session?: mongoose.ClientSession | null
+) {
+  if (!bookingIds.length) return;
+
+  const bookings = await Booking.find({ _id: { $in: bookingIds }, stockDeducted: true }).session(session ?? null);
+  for (const booking of bookings) {
+    await restoreProductStock(booking, session);
+    await booking.save({ session: session ?? undefined });
+  }
+}
+
 function serializeAddressSnapshot(address: any) {
   if (!address) return undefined;
   return {
@@ -542,6 +615,11 @@ export async function createRentalCheckoutOrder(params: {
         booking.status = bookingStatus;
         booking.payment = undefined;
         booking.securityDepositRecord = undefined;
+        // COD and walk-in orders are committed on creation, so their units come
+        // off the shelf now. Online orders wait for markOrderPaid.
+        if (!isOnline) {
+          await deductProductStock(booking, session);
+        }
         await booking.save({ session });
 
         const payment = await Payment.create(
@@ -718,6 +796,7 @@ export async function markOrderPaid(params: {
         if (booking.status === 'pending_payment') {
           booking.status = booking.deliveryMethod === 'delivery' ? 'out_for_delivery' : 'ready_for_pickup';
         }
+        await deductProductStock(booking, session);
         if (booking.depositHeldStatus !== 'held') {
           booking.depositPaymentStatus = 'held';
           booking.depositHeldStatus = 'held';
@@ -798,6 +877,11 @@ export async function markOrderPaymentFailed(params: { orderId: string; reason?:
   order.notes = params.reason || order.notes;
   await order.save();
 
+  // Usually a no-op, since an unpaid online order never took units off the
+  // shelf — but it covers a failure callback arriving after a success one.
+  const bookingIds = await Booking.find({ order: order._id }).distinct('_id');
+  await releaseBookingStock(bookingIds);
+
   await Booking.updateMany({ order: order._id }, { $set: { paymentStatus: 'failed', status: 'cancelled' } });
   await Payment.updateMany(
     { order: order._id, status: 'pending' },
@@ -857,6 +941,8 @@ export async function updateBookingLifecycle(params: {
 
         booking.status = 'cancelled';
         booking.returnStatus = 'cancelled';
+        // The goods never went out, so the held units go straight back.
+        await restoreProductStock(booking, session);
         booking.paymentStatus = booking.paymentStatus === 'paid' ? 'refunded' : booking.paymentStatus;
         booking.depositPaymentStatus = booking.depositPaymentStatus === 'held' ? 'released' : booking.depositPaymentStatus;
         booking.depositHeldStatus = 'released';
@@ -962,11 +1048,10 @@ export async function updateBookingLifecycle(params: {
         booking.actualPickupAt = booking.pickupConfirmedAt;
         booking.overdue = false;
 
-        const product = await Product.findById(booking.product).session(session);
-        if (product) {
-          product.availableStock = Math.max(0, (product.availableStock || product.totalStock || 0) - booking.quantity);
-          await product.save({ session });
-        }
+        // Normally a no-op — the units left the shelf when the order was
+        // confirmed. Kept so bookings created before stock moved to
+        // confirmation-time still deduct exactly once.
+        await deductProductStock(booking, session);
 
         await booking.save({ session });
 
@@ -1157,14 +1242,7 @@ export async function updateBookingLifecycle(params: {
           await Payment.create(paymentRecords as any, { session, ordered: true });
         }
 
-        const product = await Product.findById(booking.product).session(session);
-        if (product) {
-          product.availableStock = Math.min(
-            product.totalStock,
-            (product.availableStock || 0) + booking.quantity
-          );
-          await product.save({ session });
-        }
+        await restoreProductStock(booking, session);
 
         await booking.save({ session });
         if (booking.order) {

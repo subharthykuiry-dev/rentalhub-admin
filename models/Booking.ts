@@ -63,6 +63,13 @@ export interface IBooking extends Document {
   refundDate?: Date;
   deductionReason?: string;
   balanceDue: number;
+  /**
+   * True while this line's units are held out of `product.availableStock`.
+   * Set when the order is committed to fulfilment, cleared on return/cancel —
+   * it is what makes the stock adjustment idempotent across replayed webhooks
+   * and bookings that skip pickup entirely.
+   */
+  stockDeducted: boolean;
   overdue: boolean;
   lateFeeRateType: RentalRateType;
   lateFeeRate: number;
@@ -193,6 +200,7 @@ const BookingSchema = new Schema<IBooking>(
     refundDate: { type: Date },
     deductionReason: { type: String },
     balanceDue: { type: Number, default: 0 },
+    stockDeducted: { type: Boolean, default: false },
     overdue: { type: Boolean, default: false, index: true },
     lateFeeRateType: {
       type: String,
