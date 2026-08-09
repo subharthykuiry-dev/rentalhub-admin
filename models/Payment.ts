@@ -7,6 +7,8 @@ export type PaymentPurpose =
   | 'late_fee_deduction'
   | 'late_fee_collection';
 
+export type PaymentProvider = 'mock' | 'cashfree' | 'cod';
+
 export type PaymentStatus =
   | 'pending'
   | 'authorized'
@@ -23,7 +25,7 @@ export interface IPayment extends Document {
   booking?: mongoose.Types.ObjectId;
   bookingId?: mongoose.Types.ObjectId;
   purpose: PaymentPurpose;
-  provider: 'mock';
+  provider: PaymentProvider;
   method: string;
   status: PaymentStatus;
   amount: number;
@@ -53,7 +55,7 @@ const PaymentSchema = new Schema<IPayment>(
       ],
       required: true,
     },
-    provider: { type: String, enum: ['mock'], default: 'mock' },
+    provider: { type: String, enum: ['mock', 'cashfree', 'cod'], default: 'mock' },
     method: { type: String, default: 'mock' },
     status: {
       type: String,
@@ -69,6 +71,13 @@ const PaymentSchema = new Schema<IPayment>(
   },
   { timestamps: true }
 );
+
+// The mongoose singleton survives Next.js hot reloads, so a model registered by
+// an earlier compile keeps its old schema and silently shadows edits here.
+// Re-register in development so schema changes take effect without a restart.
+if (process.env.NODE_ENV !== 'production' && mongoose.models.Payment) {
+  mongoose.deleteModel('Payment');
+}
 
 const Payment: Model<IPayment> = mongoose.models.Payment || mongoose.model<IPayment>('Payment', PaymentSchema);
 

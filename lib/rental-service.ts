@@ -44,13 +44,42 @@ export function serializeBookingDoc(bookingDoc: any) {
   booking.securityDepositRecordId = booking.securityDepositRecord?._id?.toString?.() || booking.securityDepositRecord?.toString?.() || booking.securityDepositRecordId;
   booking.productId = booking.product?._id?.toString?.() || booking.product?.toString?.() || booking.productId;
   booking.deliveryAddressSnapshot = serializeAddressSnapshot(booking.deliveryAddressSnapshot);
-  if (booking.product && booking.product._id) {
-    booking.product.id = booking.product._id.toString();
-    if (booking.product.category && booking.product.category._id) {
-      booking.product.category.id = booking.product.category._id.toString();
+  // Only stamp `.id` onto genuinely populated documents. An ObjectId's `_id`
+  // getter returns itself, so an unpopulated ref would pass a truthy `._id`
+  // check — and `ObjectId.id` is a settable property backing the instance's
+  // internal buffer, so assigning a hex string to it corrupts the ObjectId and
+  // makes any later JSON.stringify throw a BSONError.
+  if (isPopulatedDoc(booking.product)) {
+    booking.product.id = String(booking.product._id);
+    if (isPopulatedDoc(booking.product.category)) {
+      booking.product.category.id = String(booking.product.category._id);
     }
   }
   return booking;
+}
+
+/**
+ * Converts a mongoose document into a JSON-safe plain object, turning every
+ * ObjectId into a string so the result can cross an HTTP boundary.
+ */
+export function toPlainDoc(doc: any) {
+  if (!doc) return doc;
+  const plain = doc.toObject
+    ? doc.toObject({ flattenObjectIds: true, versionKey: false })
+    : doc;
+  if (plain._id) plain.id = String(plain._id);
+  return plain;
+}
+
+/** True only for a populated sub-document, never for a bare ObjectId ref. */
+function isPopulatedDoc(value: any): boolean {
+  return (
+    Boolean(value) &&
+    typeof value === 'object' &&
+    value._bsontype !== 'ObjectId' &&
+    !(value instanceof mongoose.Types.ObjectId) &&
+    value._id != null
+  );
 }
 
 export function serializeOrderDoc(orderDoc: any) {
@@ -345,9 +374,19 @@ export async function createRentalCheckoutOrder(params: {
   deliveryMethod: 'delivery' | 'pickup';
   deliveryAddressId?: string | null;
   paymentMethod: string;
+  paymentMode?: 'cod' | 'online';
 }) {
   await connectToDatabase();
   const session = await mongoose.startSession();
+
+  // Online orders are created unpaid and parked in `pending_payment`; nothing
+  // ships and no deposit is held until the gateway confirms the payment. COD
+  // and walk-in orders are fulfilled straight away and collected on handover.
+  const isOnline = params.paymentMode === 'online';
+  const provider = isOnline ? 'cashfree' : 'cod';
+  const fulfilmentStatus = params.deliveryMethod === 'delivery' ? 'out_for_delivery' : 'ready_for_pickup';
+  const bookingStatus = isOnline ? 'pending_payment' : fulfilmentStatus;
+  const depositState = isOnline ? 'pending' : 'held';
 
   try {
     const result = await session.withTransaction(async () => {
@@ -410,14 +449,14 @@ export async function createRentalCheckoutOrder(params: {
           pickupConfirmationStatus: 'pending',
           returnConfirmationStatus: 'pending',
           returnStatus: 'pending',
-          status: params.deliveryMethod === 'delivery' ? 'out_for_delivery' : 'ready_for_pickup',
-          paymentStatus: 'paid',
+          status: bookingStatus,
+          paymentStatus: 'pending',
           paymentMethod: params.paymentMethod,
-          depositPaymentStatus: 'held',
-          depositHeldStatus: 'held',
+          depositPaymentStatus: depositState,
+          depositHeldStatus: depositState,
           depositRefundStatus: 'pending',
           depositRefunded: false,
-          depositHistory: [
+          depositHistory: isOnline ? [] : [
             {
               type: 'hold',
               amount: product.securityDeposit * entry.item.quantity,
@@ -472,12 +511,12 @@ export async function createRentalCheckoutOrder(params: {
             deliveryAddressId: params.deliveryMethod === 'delivery' ? params.deliveryAddressId || undefined : undefined,
             deliveryAddressSnapshot,
             paymentMethod: params.paymentMethod,
-            paymentStatus: 'paid',
-            paymentProvider: 'mock',
+            paymentStatus: 'pending',
+            paymentProvider: provider,
             paymentReference,
             paymentId: paymentReference,
-            status: 'confirmed',
-            confirmationAt: new Date(),
+            status: isOnline ? 'pending_payment' : 'confirmed',
+            confirmationAt: isOnline ? undefined : new Date(),
             items: orderItems,
             invoiceUrl: `/orders/${orderNumber}`,
           },
@@ -496,11 +535,11 @@ export async function createRentalCheckoutOrder(params: {
         booking.order = orderDoc._id;
         booking.invoiceNumber = orderNumber;
         booking.paymentId = paymentReference;
-        booking.paymentStatus = 'paid';
+        booking.paymentStatus = 'pending';
         booking.paymentMethod = params.paymentMethod;
-        booking.depositPaymentStatus = 'held';
-        booking.depositHeldStatus = 'held';
-        booking.status = params.deliveryMethod === 'delivery' ? 'out_for_delivery' : 'ready_for_pickup';
+        booking.depositPaymentStatus = depositState;
+        booking.depositHeldStatus = depositState;
+        booking.status = bookingStatus;
         booking.payment = undefined;
         booking.securityDepositRecord = undefined;
         await booking.save({ session });
@@ -513,9 +552,9 @@ export async function createRentalCheckoutOrder(params: {
               booking: booking._id,
               bookingId: booking._id,
               purpose: 'rental_charge',
-              provider: 'mock',
+              provider,
               method: params.paymentMethod,
-              status: 'captured',
+              status: 'pending',
               amount: booking.rentalAmount,
               currency: 'INR',
               gatewayReference: generatePaymentReference('PAY'),
@@ -523,7 +562,7 @@ export async function createRentalCheckoutOrder(params: {
                 rentalStartAt: booking.rentalStartAt,
                 expectedReturnAt: booking.expectedReturnAt,
               },
-              processedAt: new Date(),
+              processedAt: isOnline ? undefined : new Date(),
             },
             {
               user: params.userId,
@@ -531,32 +570,36 @@ export async function createRentalCheckoutOrder(params: {
               booking: booking._id,
               bookingId: booking._id,
               purpose: 'security_deposit_hold',
-              provider: 'mock',
+              provider,
               method: params.paymentMethod,
-              status: 'held',
+              status: depositState,
               amount: booking.securityDeposit,
               currency: 'INR',
               gatewayReference: generatePaymentReference('DEP'),
               metadata: {
                 securityDeposit: booking.securityDeposit,
               },
-              processedAt: new Date(),
+              processedAt: isOnline ? undefined : new Date(),
             },
           ] as any,
-          { session }
+          // Mongoose refuses to create multiple documents inside a session
+          // unless the insert is explicitly ordered.
+          { session, ordered: true }
         );
 
         const [rentalPayment, depositPayment] = payment;
 
         booking.payment = rentalPayment._id;
         booking.securityDepositRecord = depositPayment._id;
-        booking.depositHistory.push({
-          type: 'hold',
-          amount: booking.securityDeposit,
-          reason: 'Security deposit held during booking confirmation',
-          reference: depositPayment.gatewayReference,
-          createdAt: new Date(),
-        });
+        if (!isOnline) {
+          booking.depositHistory.push({
+            type: 'hold',
+            amount: booking.securityDeposit,
+            reason: 'Security deposit held during booking confirmation',
+            reference: depositPayment.gatewayReference,
+            createdAt: new Date(),
+          });
+        }
         await booking.save({ session });
 
         const depositRecord = await SecurityDeposit.create(
@@ -568,16 +611,16 @@ export async function createRentalCheckoutOrder(params: {
               product: booking.product,
               amount: booking.securityDeposit,
               currency: 'INR',
-              paymentStatus: 'held',
-              holdStatus: 'held',
+              paymentStatus: depositState,
+              holdStatus: depositState,
               refundStatus: 'pending',
-              status: 'held',
-              heldAmount: booking.securityDeposit,
+              status: depositState,
+              heldAmount: isOnline ? 0 : booking.securityDeposit,
               refundedAmount: 0,
               deductedAmount: 0,
               balanceDue: 0,
-              heldAt: new Date(),
-              transactions: [
+              heldAt: isOnline ? undefined : new Date(),
+              transactions: isOnline ? [] : [
                 {
                   type: 'hold',
                   amount: booking.securityDeposit,
@@ -588,7 +631,7 @@ export async function createRentalCheckoutOrder(params: {
               ],
             },
           ] as any,
-          { session }
+          { session, ordered: true }
         );
 
         booking.securityDepositRecord = depositRecord[0]._id;
@@ -604,8 +647,10 @@ export async function createRentalCheckoutOrder(params: {
         data: {
           order: serializeOrderDoc(await Order.findById(orderDoc._id).populate('bookings').session(session)),
           bookings: bookings.map((booking) => serializeBookingDoc(booking)),
-          paymentRecords,
-          securityDepositRecords,
+          // Raw mongoose documents cannot cross an HTTP boundary — serialising
+          // their ObjectIds throws a BSON error after the order has committed.
+          paymentRecords: paymentRecords.map(toPlainDoc),
+          securityDepositRecords: securityDepositRecords.map(toPlainDoc),
         },
       };
     });
@@ -621,6 +666,145 @@ export async function createRentalCheckoutOrder(params: {
   } finally {
     session.endSession();
   }
+}
+
+/**
+ * Promotes an order from unpaid to paid and holds its security deposits.
+ *
+ * Used for both an online gateway confirmation and an admin marking COD cash
+ * as collected at handover. Idempotent — an order already paid is returned
+ * untouched, so a webhook and a manual click cannot double-apply.
+ */
+export async function markOrderPaid(params: {
+  orderId: string;
+  gatewayPaymentId?: string;
+  paymentMethod?: string;
+  collectedBy?: string;
+}) {
+  await connectToDatabase();
+  const session = await mongoose.startSession();
+
+  try {
+    const result = await session.withTransaction(async () => {
+      const order = await Order.findById(params.orderId).session(session);
+      if (!order) {
+        return { ok: false as const, status: 404, error: 'Order not found' };
+      }
+
+      if (order.paymentStatus === 'paid') {
+        return {
+          ok: true as const,
+          status: 200,
+          data: { alreadyPaid: true, order: serializeOrderDoc(order) },
+        };
+      }
+
+      const now = new Date();
+
+      order.paymentStatus = 'paid';
+      order.status = 'confirmed';
+      order.confirmationAt = order.confirmationAt || now;
+      if (params.gatewayPaymentId) order.paymentId = params.gatewayPaymentId;
+      if (params.paymentMethod) order.paymentMethod = params.paymentMethod;
+      if (params.collectedBy) {
+        order.notes = `${order.notes ? order.notes + ' | ' : ''}COD collected by ${params.collectedBy} on ${now.toISOString()}`;
+      }
+      await order.save({ session });
+
+      const bookings = await Booking.find({ order: order._id }).session(session);
+
+      for (const booking of bookings) {
+        booking.paymentStatus = 'paid';
+        if (booking.status === 'pending_payment') {
+          booking.status = booking.deliveryMethod === 'delivery' ? 'out_for_delivery' : 'ready_for_pickup';
+        }
+        if (booking.depositHeldStatus !== 'held') {
+          booking.depositPaymentStatus = 'held';
+          booking.depositHeldStatus = 'held';
+          booking.depositHistory.push({
+            type: 'hold',
+            amount: booking.securityDeposit,
+            reason: 'Security deposit held on payment confirmation',
+            reference: params.gatewayPaymentId || order.paymentReference || generatePaymentReference('DEP'),
+            createdAt: now,
+          });
+        }
+        await booking.save({ session });
+      }
+
+      await Payment.updateMany(
+        { order: order._id, purpose: 'rental_charge' },
+        { $set: { status: 'captured', processedAt: now } },
+        { session }
+      );
+
+      await Payment.updateMany(
+        { order: order._id, purpose: 'security_deposit_hold' },
+        { $set: { status: 'held', processedAt: now } },
+        { session }
+      );
+
+      // Iterated rather than bulk-updated so each deposit copies its own
+      // `amount` into `heldAmount` and records a hold transaction.
+      const deposits = await SecurityDeposit.find({ order: order._id }).session(session);
+      for (const deposit of deposits) {
+        if (deposit.status === 'held') continue;
+        deposit.paymentStatus = 'held';
+        deposit.holdStatus = 'held';
+        deposit.status = 'held';
+        deposit.heldAmount = deposit.amount;
+        deposit.heldAt = now;
+        deposit.transactions.push({
+          type: 'hold',
+          amount: deposit.amount,
+          reason: 'Security deposit held on payment confirmation',
+          reference: params.gatewayPaymentId || order.paymentReference || generatePaymentReference('DEP'),
+          createdAt: now,
+        } as any);
+        await deposit.save({ session });
+      }
+
+      return {
+        ok: true as const,
+        status: 200,
+        data: {
+          alreadyPaid: false,
+          order: serializeOrderDoc(await Order.findById(order._id).populate('bookings').session(session)),
+        },
+      };
+    });
+
+    return result;
+  } catch (error: any) {
+    console.error('markOrderPaid error:', error);
+    return { ok: false as const, status: 500, error: error?.message || 'Failed to confirm payment' };
+  } finally {
+    session.endSession();
+  }
+}
+
+/** Records a failed/abandoned payment so the order stops holding stock. */
+export async function markOrderPaymentFailed(params: { orderId: string; reason?: string }) {
+  await connectToDatabase();
+
+  const order = await Order.findById(params.orderId);
+  if (!order) return { ok: false as const, status: 404, error: 'Order not found' };
+  if (order.paymentStatus === 'paid') {
+    return { ok: true as const, status: 200, data: { order: serializeOrderDoc(order) } };
+  }
+
+  order.paymentStatus = 'failed';
+  order.status = 'payment_failed';
+  order.notes = params.reason || order.notes;
+  await order.save();
+
+  await Booking.updateMany({ order: order._id }, { $set: { paymentStatus: 'failed', status: 'cancelled' } });
+  await Payment.updateMany(
+    { order: order._id, status: 'pending' },
+    { $set: { status: 'failed', failureReason: params.reason || 'Payment not completed' } }
+  );
+
+  return { ok: true as const, status: 200, data: { order: serializeOrderDoc(order) } };
 }
 
 export async function updateBookingLifecycle(params: {
@@ -968,7 +1152,9 @@ export async function updateBookingLifecycle(params: {
           });
         }
         if (paymentRecords.length > 0) {
-          await Payment.create(paymentRecords as any, { session });
+          // Mongoose refuses to create multiple documents inside a session
+          // unless the insert is explicitly ordered.
+          await Payment.create(paymentRecords as any, { session, ordered: true });
         }
 
         const product = await Product.findById(booking.product).session(session);

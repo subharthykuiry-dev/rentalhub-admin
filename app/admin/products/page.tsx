@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { adminFetch } from '@/lib/admin-client';
 
 interface IProduct {
   _id: string;
@@ -53,18 +54,17 @@ export default function ProductsPage() {
   const [search, setSearch] = useState('');
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('table');
 
+  const [error, setError] = useState('');
+
+  // Scoped to the signed-in admin server-side, so this lists only products
+  // this admin published rather than the whole marketplace catalogue.
   const fetchProducts = async () => {
     try {
       setLoading(true);
-      const res = await fetch('/api/products');
-      const data = await res.json();
-      if (data.success) {
-        setProducts(data.data);
-      } else {
-        console.error('Failed to fetch products:', data.error);
-      }
-    } catch (error) {
-      console.error('Error fetching products:', error);
+      setError('');
+      setProducts(await adminFetch<IProduct[]>('/api/admin/products'));
+    } catch (err: any) {
+      setError(err.message);
     } finally {
       setLoading(false);
     }
@@ -78,15 +78,10 @@ export default function ProductsPage() {
     if (!confirm(`Are you sure you want to delete "${productName}"?`)) return;
 
     try {
-      const res = await fetch(`/api/products/${id}`, { method: 'DELETE' });
-      const data = await res.json();
-      if (data.success) {
-        setProducts((prev) => prev.filter((p) => p._id !== id));
-      } else {
-        alert(data.error || 'Failed to delete product');
-      }
-    } catch (error) {
-      alert('Error deleting product');
+      await adminFetch(`/api/admin/products?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+      setProducts((prev) => prev.filter((p) => p._id !== id));
+    } catch (err: any) {
+      alert(err.message || 'Failed to delete product');
     }
   };
 
@@ -164,7 +159,7 @@ export default function ProductsPage() {
         <div>
           <h1 className="text-[20px] font-semibold text-slate-900 tracking-tight">Rental catalog</h1>
           <p className="text-[13px] text-slate-500 mt-0.5">
-            Manage inventory, pickup locations, and deposit rules.
+            Products you have published — inventory, pickup locations and deposit rules.
           </p>
         </div>
 
@@ -176,6 +171,10 @@ export default function ProductsPage() {
           Add product
         </Link>
       </div>
+
+      {error && (
+        <div className="bg-rose-50 border border-rose-200 text-rose-800 text-sm px-4 py-3 rounded-lg">{error}</div>
+      )}
 
       {/* ================= STATS ================= */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">

@@ -5,11 +5,15 @@
 // a walk-in order and an online order are now the same kind of record, which is
 // what makes the admin dashboard able to see customer orders at all.
 
+import mongoose from 'mongoose';
 import connectToDatabase from '@/config/db';
 import Booking from '@/models/Booking';
 import Order from '@/models/Order';
 import Invoice from '@/models/Invoice';
+import Payment from '@/models/Payment';
+import SecurityDeposit from '@/models/SecurityDeposit';
 import User from '@/models/User';
+import { getAdminProductIds } from './paymentService';
 import {
   createRentalCheckoutOrder,
   updateBookingLifecycle,
@@ -53,6 +57,9 @@ export async function createWalkInOrder(input: CreateWalkInInput) {
     deliveryMethod: input.deliveryMode === 'SHIP' ? 'delivery' : 'pickup',
     deliveryAddressId: input.deliveryAddressId,
     paymentMethod: input.paymentMethod || 'cash',
+    // A walk-in is settled at the counter, so it follows the same
+    // collect-on-handover lifecycle as a COD order.
+    paymentMode: 'cod',
   });
 
   if (!result.ok) return result;
@@ -73,7 +80,9 @@ export async function createWalkInOrder(input: CreateWalkInInput) {
   };
 }
 
-export async function markPickedUp(bookingId: string) {
+export async function markPickedUp(bookingId: string, adminEmail?: string) {
+  const denied = await assertOwnsBooking(bookingId, adminEmail);
+  if (denied) return denied;
   return updateBookingLifecycle({ bookingId, action: 'confirm_pickup' });
 }
 
@@ -92,7 +101,10 @@ interface ProcessReturnInput {
  * the admin can waive the late fee and add damage / missing-accessory charges,
  * both of which are deducted from the held deposit.
  */
-export async function processReturn(input: ProcessReturnInput) {
+export async function processReturn(input: ProcessReturnInput & { adminEmail?: string }) {
+  const denied = await assertOwnsBooking(input.bookingId, input.adminEmail);
+  if (denied) return denied;
+
   return updateBookingLifecycle({
     bookingId: input.bookingId,
     action: 'return',
@@ -114,37 +126,89 @@ export async function flagOverdueOrders() {
  * which is what the operational views care about — with customer and product
  * joined in.
  */
-export async function listBookings(filters: { status?: string; search?: string } = {}) {
+export async function listBookings(
+  filters: { status?: string; search?: string; adminEmail?: string } = {}
+) {
   await connectToDatabase();
   await markOverdueBookings();
 
   const where: Record<string, unknown> = {};
+
+  // Ownership is per rental line: an admin sees only bookings for products
+  // they published, even when the order also contains another seller's items.
+  const productIds = await getAdminProductIds(filters.adminEmail);
+  if (productIds) {
+    if (productIds.length === 0) return [];
+    where.product = { $in: productIds };
+  }
+
   if (filters.status && filters.status !== 'all') {
     where.status = filters.status;
   }
 
   if (filters.search) {
-    const matchingUsers = await User.find({
-      $or: [
-        { name: { $regex: filters.search, $options: 'i' } },
-        { email: { $regex: filters.search, $options: 'i' } },
-      ],
+    const term = filters.search.trim();
+    // Phone is what a customer actually reads out at the counter, so digits are
+    // matched against the phone field with any formatting stripped, while the
+    // same term still matches a name, email or order number.
+    const digits = term.replace(/\D/g, '');
+
+    const userOr: Record<string, unknown>[] = [
+      { name: { $regex: term, $options: 'i' } },
+      { email: { $regex: term, $options: 'i' } },
+    ];
+    if (digits.length >= 4) {
+      // Phone is a Number on some records and a String on others, and $regex
+      // cannot be applied to a numeric field — cast before matching so a
+      // partial number (e.g. the last 6 digits) works for both shapes.
+      userOr.push({
+        $expr: {
+          $regexMatch: { input: { $toString: { $ifNull: ['$phone', ''] } }, regex: digits },
+        },
+      });
+    }
+
+    const matchingUsers = await User.find({ $or: userOr }).select('_id');
+    const matchingOrders = await Order.find({
+      orderNumber: { $regex: term, $options: 'i' },
     }).select('_id');
-    where.user = { $in: matchingUsers.map((u) => u._id) };
+
+    where.$or = [
+      { user: { $in: matchingUsers.map((u) => u._id) } },
+      { order: { $in: matchingOrders.map((o) => o._id) } },
+    ];
   }
 
   const bookings = await Booking.find(where)
     .populate('user', 'name email phone')
     .populate({ path: 'product', select: 'name imageUrl images storeLocation' })
-    .populate('order', 'orderNumber invoiceNumber paymentStatus')
+    .populate('order', 'orderNumber invoiceNumber paymentStatus paymentProvider paymentMethod totalAmount')
     .sort({ createdAt: -1 })
     .limit(200);
 
-  return bookings.map((booking) => serializeBookingDoc(booking));
+  return bookings.map((booking: any) => {
+    const row = serializeBookingDoc(booking);
+    // Payment state lives on the order, but the operational list is per-booking,
+    // so surface it on each row rather than making the UI dig for it.
+    return {
+      ...row,
+      orderNumber: booking.order?.orderNumber ?? null,
+      paymentStatus: booking.order?.paymentStatus ?? row.paymentStatus,
+      paymentProvider: booking.order?.paymentProvider ?? null,
+      orderTotal: booking.order?.totalAmount ?? null,
+      customerName: booking.user?.name ?? 'Unknown',
+      customerEmail: booking.user?.email ?? '',
+      customerPhone: booking.user?.phone ? String(booking.user.phone) : '',
+      productName: booking.product?.name ?? 'Unknown product',
+    };
+  });
 }
 
-export async function getBookingDetail(bookingId: string) {
+export async function getBookingDetail(bookingId: string, adminEmail?: string) {
   await connectToDatabase();
+
+  const denied = await assertOwnsBooking(bookingId, adminEmail);
+  if (denied) return null;
 
   const booking = await Booking.findById(bookingId)
     .populate('user', 'name email phone addresses')
@@ -153,6 +217,184 @@ export async function getBookingDetail(bookingId: string) {
 
   if (!booking) return null;
   return serializeBookingDoc(booking);
+}
+
+/**
+ * Confirms the order contains at least one product this admin published.
+ * Returns an error result when it does not, or null when access is allowed.
+ */
+async function assertOwnsOrder(orderId: string, adminEmail?: string) {
+  const productIds = await getAdminProductIds(adminEmail);
+  if (!productIds) return null;
+
+  const owns = productIds.length
+    ? await Booking.exists({ order: orderId, product: { $in: productIds } })
+    : null;
+
+  if (!owns) {
+    return { ok: false as const, status: 403, error: 'This order belongs to another seller.' };
+  }
+  return null;
+}
+
+/** Same check, but for a single rental line. */
+async function assertOwnsBooking(bookingId: string, adminEmail?: string) {
+  const productIds = await getAdminProductIds(adminEmail);
+  if (!productIds) return null;
+
+  const owns = productIds.length
+    ? await Booking.exists({ _id: bookingId, product: { $in: productIds } })
+    : null;
+
+  if (!owns) {
+    return { ok: false as const, status: 403, error: 'This rental belongs to another seller.' };
+  }
+  return null;
+}
+
+/**
+ * Permanently removes an order and everything hanging off it.
+ *
+ * `order.bookings`, `order.items[].booking` and the booking's own back
+ * reference can drift apart, so the union of all three is deleted rather than
+ * trusting any single side of the link — otherwise orphaned bookings keep
+ * reserving stock forever.
+ */
+export async function deleteOrder(orderId: string, adminEmail?: string) {
+  if (!mongoose.Types.ObjectId.isValid(orderId)) {
+    return { ok: false as const, status: 404, error: 'Order not found' };
+  }
+
+  await connectToDatabase();
+
+  const denied = await assertOwnsOrder(orderId, adminEmail);
+  if (denied) return denied;
+  const session = await mongoose.startSession();
+
+  try {
+    const result = await session.withTransaction(async () => {
+      const order = await Order.findById(orderId).session(session);
+      if (!order) return { ok: false as const, status: 404, error: 'Order not found' };
+
+      const backLinked = await Booking.find({ order: order._id }).select('_id').session(session);
+      const bookingIds = [
+        ...new Map(
+          [
+            ...(order.bookings || []),
+            ...(order.items || []).map((item: any) => item.booking),
+            ...backLinked.map((b) => b._id),
+          ]
+            .filter(Boolean)
+            .map((id: any) => [String(id), id])
+        ).values(),
+      ];
+
+      const byBooking = bookingIds.length ? [{ booking: { $in: bookingIds } }] : [];
+
+      const payments = await Payment.deleteMany({
+        $or: [
+          { order: order._id },
+          ...byBooking,
+          ...(bookingIds.length ? [{ bookingId: { $in: bookingIds } }] : []),
+        ],
+      }).session(session);
+
+      const deposits = await SecurityDeposit.deleteMany({
+        $or: [{ order: order._id }, ...byBooking],
+      }).session(session);
+
+      const invoices = await Invoice.deleteMany({ orderId: order._id }).session(session);
+
+      const bookings = bookingIds.length
+        ? await Booking.deleteMany({ _id: { $in: bookingIds } }).session(session)
+        : { deletedCount: 0 };
+
+      await Order.deleteOne({ _id: order._id }).session(session);
+
+      return {
+        ok: true as const,
+        status: 200,
+        data: {
+          orderNumber: order.orderNumber,
+          deleted: {
+            orders: 1,
+            bookings: bookings.deletedCount || 0,
+            payments: payments.deletedCount || 0,
+            securityDeposits: deposits.deletedCount || 0,
+            invoices: invoices.deletedCount || 0,
+          },
+        },
+      };
+    });
+
+    return result;
+  } catch (error: any) {
+    console.error('deleteOrder error:', error);
+    return { ok: false as const, status: 500, error: error?.message || 'Failed to delete order' };
+  } finally {
+    session.endSession();
+  }
+}
+
+/**
+ * Approves an order that is waiting on a decision, moving it into fulfilment.
+ *
+ * Refuses orders still awaiting an online payment — approving one would ship
+ * goods against money the gateway never confirmed.
+ */
+export async function approveOrder(orderId: string, adminEmail?: string) {
+  await connectToDatabase();
+
+  const denied = await assertOwnsOrder(orderId, adminEmail);
+  if (denied) return denied;
+
+  const order = await Order.findById(orderId);
+  if (!order) return { ok: false as const, status: 404, error: 'Order not found' };
+
+  if (order.paymentProvider === 'cashfree' && order.paymentStatus !== 'paid') {
+    return {
+      ok: false as const,
+      status: 400,
+      error: 'This order is still awaiting its online payment. Confirm the payment before approving.',
+    };
+  }
+
+  order.status = 'confirmed';
+  order.confirmationAt = order.confirmationAt || new Date();
+  await order.save();
+
+  const bookings = await Booking.find({ order: order._id });
+  for (const booking of bookings) {
+    if (['draft', 'pending_payment'].includes(booking.status)) {
+      booking.status = booking.deliveryMethod === 'delivery' ? 'out_for_delivery' : 'ready_for_pickup';
+      await booking.save();
+    }
+  }
+
+  return { ok: true as const, status: 200, data: { orderNumber: order.orderNumber } };
+}
+
+/** Cancels every booking on an order, releasing the reserved stock. */
+export async function cancelOrder(orderId: string, adminEmail?: string) {
+  await connectToDatabase();
+
+  const denied = await assertOwnsOrder(orderId, adminEmail);
+  if (denied) return denied;
+
+  const order = await Order.findById(orderId);
+  if (!order) return { ok: false as const, status: 404, error: 'Order not found' };
+
+  const bookings = await Booking.find({ order: order._id }).select('_id status');
+  const results = [];
+  for (const booking of bookings) {
+    if (['completed', 'cancelled'].includes(booking.status)) continue;
+    results.push(await updateBookingLifecycle({ bookingId: String(booking._id), action: 'cancel' }));
+  }
+
+  const failed = results.find((r: any) => !r.ok);
+  if (failed) return failed;
+
+  return { ok: true as const, status: 200, data: { orderNumber: order.orderNumber, cancelled: results.length } };
 }
 
 export async function listOrders(filters: { status?: string } = {}) {

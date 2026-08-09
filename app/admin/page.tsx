@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import SalesOverview from '@/componenets/admin/SalesOverview';
+import { adminFetch } from '@/lib/admin-client';
 
 interface IProduct {
   _id: string;
@@ -52,36 +54,14 @@ export default function AdminDashboardPage() {
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-  // NOTE: filters by an email read out of localStorage, which the client
-  // fully controls — anyone can edit that value in devtools and pull
-  // another admin's inventory. The server endpoint needs to derive the
-  // admin from the auth token/session, not trust this query param.
+  // Ownership is derived from the admin JWT server-side. The previous version
+  // passed an email read out of localStorage, which the browser fully controls
+  // — anyone could edit it in devtools and pull another admin's inventory.
   const fetchDashboardData = async () => {
     try {
       setLoading(true);
-
-      let adminEmail = '';
-      const storedAdmin = localStorage.getItem('admin');
-      if (storedAdmin) {
-        if (storedAdmin.startsWith('{')) {
-          const adminObj = JSON.parse(storedAdmin);
-          adminEmail = adminObj?.email || '';
-        } else if (storedAdmin.includes('@')) {
-          adminEmail = storedAdmin;
-        }
-      }
-
-      const url = adminEmail
-        ? `/api/products?publishedBy=${encodeURIComponent(adminEmail)}`
-        : '/api/products';
-
-      const res = await fetch(url);
-      const data = await res.json();
-
-      if (data.success) {
-        setProducts(data.data);
-        setLastUpdated(new Date());
-      }
+      setProducts(await adminFetch<IProduct[]>('/api/admin/products'));
+      setLastUpdated(new Date());
     } catch (error) {
       console.error('Error fetching dashboard data:', error);
     } finally {
@@ -181,7 +161,7 @@ export default function AdminDashboardPage() {
         <div>
           <h1 className="text-[20px] font-semibold text-slate-900 tracking-tight">Operations dashboard</h1>
           <p className="text-[13px] text-slate-500 mt-0.5">
-            Overview of inventory, store allocation, and fleet utilization.
+            Sales, collections, inventory and fleet utilization.
           </p>
         </div>
 
@@ -202,6 +182,9 @@ export default function AdminDashboardPage() {
           </Link>
         </div>
       </div>
+
+      {/* ================= SALES & COLLECTIONS ================= */}
+      <SalesOverview />
 
       {/* ================= KPI CARDS ================= */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
