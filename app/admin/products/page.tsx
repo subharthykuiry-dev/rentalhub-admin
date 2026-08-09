@@ -453,7 +453,7 @@ export default function ProductsPage() {
                 <th className="px-5 py-3">Deposit</th>
                 <th className="px-5 py-3">Stock</th>
                 <th className="px-5 py-3">Status</th>
-                <th className="px-5 py-3 text-right">Actions</th>
+                <th className="px-5 py-3 text-right w-[1%] whitespace-nowrap">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -482,7 +482,7 @@ export default function ProductsPage() {
                     <div className="font-medium text-slate-700">{product.storeLocation?.shopName}</div>
                     <div className="text-slate-500">{product.storeLocation?.address}, {product.storeLocation?.city}</div>
                   </td>
-                  <td className="px-5 py-3 text-[12.5px] font-semibold text-emerald-600">
+                  <td className="px-5 py-3 text-[12.5px] font-semibold text-emerald-600 whitespace-nowrap">
                     {product.deposit?.type === 'percentage'
                       ? `${product.deposit?.value}% rent`
                       : `₹${product.deposit?.value} fixed`}
@@ -500,19 +500,21 @@ export default function ProductsPage() {
                       {product.isActive ? 'Active' : 'Hidden'}
                     </span>
                   </td>
-                  <td className="px-5 py-3 text-right space-x-2">
-                    <Link
-                      href={`/admin/products/${product._id}`}
-                      className="text-slate-700 hover:text-slate-900 font-medium text-[12px] border border-slate-400 px-2.5 py-1 rounded hover:bg-slate-50"
-                    >
-                      Edit
-                    </Link>
-                    <button
-                      onClick={() => handleDelete(product._id, product.name)}
-                      className="text-red-600 hover:text-red-700 font-medium text-[12px] border border-red-300 px-2.5 py-1 rounded hover:bg-red-50"
-                    >
-                      Delete
-                    </button>
+                  <td className="px-5 py-3 whitespace-nowrap">
+                    <div className="flex items-center justify-end gap-2">
+                      <Link
+                        href={`/admin/products/${product._id}`}
+                        className="inline-flex items-center justify-center h-7 px-2.5 rounded border border-slate-400 text-slate-700 hover:text-slate-900 hover:bg-slate-50 font-medium text-[12px] leading-none transition-colors"
+                      >
+                        Edit
+                      </Link>
+                      <button
+                        onClick={() => handleDelete(product._id, product.name)}
+                        className="inline-flex items-center justify-center h-7 px-2.5 rounded border border-red-300 text-red-600 hover:text-red-700 hover:bg-red-50 font-medium text-[12px] leading-none transition-colors"
+                      >
+                        Delete
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
